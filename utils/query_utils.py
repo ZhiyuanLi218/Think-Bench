@@ -1,9 +1,11 @@
 import re
 import time
 import openai
+import traceback
 from openai import OpenAI
-import re
-openai.request_timeout = 3600
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+SYSTEM_MESSAGE = "You are an AI assistant that helps people solve their questions."
 
 def extract_think_content(content):
     think_pattern = re.compile(r'<think>(.*?)</think>', re.DOTALL)
@@ -16,394 +18,163 @@ def extract_think_content(content):
         return content, ""
 
 
-def deepseek(inputs, args):
-    client = OpenAI(api_key=args.openai_api_key, base_url=args.llm_url)
-    system_messages = "You are an AI assistant that helps people solve their questions."
-    messages = [
-        {
-            "role": "system",
-            "content": system_messages
-        },
-        {
-            "role": "user",
-            "content": inputs["query_input"]
-        }
+def create_client(args, timeout=3600):
+    return OpenAI(api_key=args.openai_api_key, base_url=args.llm_url, timeout=timeout)
+
+
+def create_messages(inputs):
+    """Create message structure for API calls."""
+    return [
+        {"role": "system", "content": SYSTEM_MESSAGE},
+        {"role": "user", "content": inputs["query_input"]}
     ]
-    success = True
-    while success:
-        try:
-            response = client.chat.completions.create(
-                model=args.model,
-                messages=messages,
-            )
-            if response.choices[0].message.content is not None:
-                success = False
-        except openai.RateLimitError as e:
-            print('Rate limit exceeded, waiting for 60 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(60)
-        except openai.APIConnectionError as e:
-            print('API connection error, waiting for 10 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(10)
-        except Exception as e:
-            if 'RequestTimeOut' in str(e):
-                print(f'ERROR: {e}')
-                time.sleep(5)
-            else:
-                print(f'ERROR: {e}')
-                return None, None
-    return response.choices[0].message.content, response.choices[0].message.reasoning_content
+
+
+def handle_api_errors(func):
+    def wrapper(inputs, args, *func_args, **func_kwargs):
+        retries = 0
+        max_retries = 5
+        while retries < max_retries:
+            try:
+                return func(inputs, args, *func_args, **func_kwargs)
+            except openai.RateLimitError as e:
+                print(f'Rate limit exceeded, waiting for 60 seconds... ERROR: {e}')
+                time.sleep(60)
+                retries += 1
+            except openai.APIConnectionError as e:
+                print(f'API connection error, waiting for 10 seconds... ERROR: {e}')
+                time.sleep(10)
+                retries += 1
+            except Exception as e:
+                if 'RequestTimeOut' in str(e):
+                    print(f'Timeout error, retrying in 5 seconds... ERROR: {e}')
+                    time.sleep(5)
+                    retries += 1
+                else:
+                    print(f'Unexpected error: {e}')
+                    return None, None
+        print(f'Max retries ({max_retries}) reached, giving up.')
+        return None, None
+    return wrapper
+
+
+@handle_api_errors
+def process_non_streaming_response(client, inputs, args, extra_body=None):
+    response = client.chat.completions.create(
+        model=args.model,
+        messages=create_messages(inputs),
+        extra_body=extra_body or {}
+    )
+    content = response.choices[0].message.content
+    reasoning = getattr(response.choices[0].message, 'reasoning_content', None) or ""
+    if reasoning:
+        return content, reasoning
+    return extract_think_content(content)
+
+
+@handle_api_errors
+def process_streaming_response(client, inputs, args, extra_body=None):
+    completion = client.chat.completions.create(
+        model=args.model,
+        messages=create_messages(inputs),
+        stream=True,
+        extra_body=extra_body or {}
+    )
+    reasoning_content = ""
+    answer_content = ""
+    is_answering = False
+
+    try:
+        for chunk in completion:
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    reasoning_content += delta.reasoning_content
+                elif delta.content is not None:
+                    if not is_answering and delta.content:
+                        is_answering = True
+                    answer_content += delta.content
+    except Exception as e:
+        print(f'Error at input index {inputs.get("index", "unknown")}: {e}')
+        return None, None
+
+    return answer_content, reasoning_content
+
+def deepseek(inputs, args):
+    client = create_client(args)
+    return process_non_streaming_response(client, inputs, args)
 
 def qwq(inputs, args):
-    client = OpenAI(api_key=args.openai_api_key, base_url=args.llm_url)
-    system_messages = "You are an AI assistant that helps people solve their questions."
-    messages = [
-        {
-            "role": "system",
-            "content": system_messages
-        },
-        {
-            "role": "user",
-            "content": inputs["query_input"]
-        }
-    ]
-    success = True
-    while success:
-        try:
-            completion  = client.chat.completions.create(
-                model=args.model,
-                messages=messages,
-                stream=True,
-            )
-            success = False
-        except openai.RateLimitError as e:
-            print('Rate limit exceeded, waiting for 60 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(60)
-        except openai.APIConnectionError as e:
-            print('API connection error, waiting for 10 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(10)
-        except Exception as e:
-            if 'RequestTimeOut' in str(e):
-                print(f'ERROR: {e}')
-                time.sleep(5)
-            else:
-                print(f'ERROR: {e}')
-                return None, None
-
-    reasoning_content = ""  # define reasoning content
-    answer_content = ""     # define answer content
-    is_answering = False   # judge if the model is answering
-    try:
-        for chunk in completion:
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                # reasoning content
-                if hasattr(delta, 'reasoning_content') and delta.reasoning_content != None:
-                    reasoning_content += delta.reasoning_content
-                else:
-                    # answer content
-                    if delta.content != "" and is_answering is False:
-                        is_answering = True
-                    answer_content += delta.content
-    except Exception as e:
-        print(inputs["index"])
-        print(f'ERROR: {e}')
-        return None, None
-    return answer_content, reasoning_content
+    client = create_client(args)
+    return process_streaming_response(client, inputs, args)
 
 def qwen3(inputs, args):
-    client = OpenAI(api_key=args.openai_api_key, base_url=args.llm_url)
-    system_messages = "You are an AI assistant that helps people solve their questions."
-    messages = [
-        {
-            "role": "system",
-            "content": system_messages
-        },
-        {
-            "role": "user",
-            "content": inputs["query_input"]
-        }
-    ]
-    success = True
-    while success:
-        try:
-            completion  = client.chat.completions.create(
-                model=args.model,
-                messages=messages,
-                extra_body={"enable_thinking": True},
-                stream=True,
-            )
-            success = False
-        except openai.RateLimitError as e:
-            print('Rate limit exceeded, waiting for 60 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(60)
-        except openai.APIConnectionError as e:
-            print('API connection error, waiting for 10 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(10)
-        except Exception as e:
-            if 'RequestTimeOut' in str(e):
-                print(f'ERROR: {e}')
-                time.sleep(5)
-            else:
-                print(f'ERROR: {e}')
-                return None, None
-
-    reasoning_content = ""  # define reasoning content
-    answer_content = ""     # define answer content
-    is_answering = False   # judge if the model is answering
-    try:
-        for chunk in completion:
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                # reasoning content
-                if hasattr(delta, 'reasoning_content') and delta.reasoning_content != None:
-                    reasoning_content += delta.reasoning_content
-                else:
-                    # answer content
-                    if delta.content != "" and is_answering is False:
-                        is_answering = True
-                    answer_content += delta.content
-    except Exception as e:
-        print(inputs["index"])
-        print(f'ERROR: {e}')
-        return None, None
-    return answer_content, reasoning_content
-
+    client = create_client(args)
+    return process_streaming_response(client, inputs, args, extra_body={"enable_thinking": True})
 
 def claude(inputs, args):
-    client = OpenAI(api_key=args.openai_api_key, base_url=args.llm_url)
-    system_messages = "You are an AI assistant that helps people solve their questions."
-    messages = [
-        {
-            "role": "system",
-            "content": system_messages
-        },
-        {
-            "role": "user",
-            "content": inputs["query_input"]
-        }
-    ]
-    success = True
-    while success:
-        try:
-            response = client.chat.completions.create(
-                model=args.model,
-                messages=messages,
-            )
-            content, reasoning_content = extract_think_content(response.choices[0].message.content)
-            if content is not None and reasoning_content is not None:
-                success = False
-        except openai.RateLimitError as e:
-            print('Rate limit exceeded, waiting for 60 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(60)
-        except openai.APIConnectionError as e:
-            print('API connection error, waiting for 10 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(10)
-        except Exception as e:
-            if 'RequestTimeOut' in str(e):
-                print(f'ERROR: {e}')
-                time.sleep(5)
-            else:
-                print(f'ERROR: {e}')
-                return None, None
-    
-    return content, reasoning_content
-
+    client = create_client(args)
+    content, reasoning = process_non_streaming_response(client, inputs, args)
+    return extract_think_content(content) if content else (None, None)
 
 def grok3(inputs, args):
-    client = OpenAI(api_key=args.openai_api_key, base_url=args.llm_url)
-    system_messages = "You are an AI assistant that helps people solve their questions."
-    messages = [
-        {
-            "role": "system",
-            "content": system_messages
-        },
-        {
-            "role": "user",
-            "content": inputs["query_input"]
-        }
-    ]
-    success = True
-    while success:
-        try:
-            response = client.chat.completions.create(
-                model=args.model,
-                messages=messages,
-            )
-            success = False
-        except openai.RateLimitError as e:
-            print('Rate limit exceeded, waiting for 60 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(60)
-        except openai.APIConnectionError as e:
-            print('API connection error, waiting for 10 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(10)
-        except Exception as e:
-            if 'RequestTimeOut' in str(e):
-                print(f'ERROR: {e}')
-                time.sleep(5)
-            else:
-                print(f'ERROR: {e}')
-                return None, None
-    
-    return response.choices[0].message.content, response.choices[0].message.reasoning_content
+    client = create_client(args)
+    return process_non_streaming_response(client, inputs, args)
 
-def ernie(inputs, args): 
-    client = OpenAI(api_key=args.openai_api_key, base_url=args.llm_url)
-    system_messages = "You are an AI assistant that helps people solve their questions."
-    messages = [
-        {
-            "role": "system",
-            "content": system_messages
-        },
-        {
-            "role": "user",
-            "content": inputs["query_input"]
-        }
-    ]
-    success = True
-    while success:
-        try:
-            response = client.chat.completions.create(
-                model=args.model,
-                messages=messages,
-                stream=True,
-            )
-            success = False
-        except openai.RateLimitError as e:
-            print('Rate limit exceeded, waiting for 60 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(60)
-        except Exception as e:
-            print(f'ERROR: {e}')
-            return None, None
-    reasoning_content = ""
-    content = ""
-    try:
-        for chunk in response:
-            if hasattr(chunk.choices[0].delta, 'reasoning_content') and chunk.choices[0].delta.reasoning_content:
-                reasoning_content += chunk.choices[0].delta.reasoning_content
-            else:
-                if chunk.choices[0].delta.content is not None:
-                    content += chunk.choices[0].delta.content
-    except Exception as e:
-        print(inputs["index"])
-        print(f'ERROR: {e}')
-        return None, None
-    return content, reasoning_content
+def ernie(inputs, args):
+    client = create_client(args)
+    return process_streaming_response(client, inputs, args)
 
 def glm(inputs, args):
-    client = OpenAI(api_key=args.openai_api_key, base_url=args.llm_url)
-    system_messages = "You are an AI assistant that helps people solve their questions."
-    messages = [
-        {
-            "role": "system",
-            "content": system_messages
-        },
-        {
-            "role": "user",
-            "content": inputs["query_input"]
-        }
-    ]
-    success = True
-    while success:
-        try:
-            response = client.chat.completions.create(
-                model=args.model,
-                messages=messages,
-                stream=True,
-            )
-            success = False
-        except openai.RateLimitError as e:
-            print('Rate limit exceeded, waiting for 60 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(60)
-        except openai.APIConnectionError as e:
-            print('API connection error, waiting for 10 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(10)
-        except Exception as e:
-            if 'RequestTimeOut' in str(e):
-                print(f'ERROR: {e}')
-                time.sleep(5)
-            else:
-                print(f'ERROR: {e}')
-                return None, None
-    content = ""
-    try:
-        for chunk in response:
-            if chunk.choices[0].delta.content is not None:
-                content += chunk.choices[0].delta.content
-        contents, reasoning_content = extract_think_content(content)
-    except Exception as e:
-        print(inputs["index"])
-        print(f'ERROR: {e}')
-        return None, None
-        
-    return contents, reasoning_content
+    client = create_client(args)
+    content, _ = process_streaming_response(client, inputs, args)
+    return extract_think_content(content) if content else (None, None)
 
-def deepseek_distill(inputs, args): 
-    client = OpenAI(api_key=args.openai_api_key, base_url=args.llm_url)
-    system_messages = "You are an AI assistant that helps people solve their questions."
-    messages = [
-        {
-            "role": "system",
-            "content": system_messages
-        },
-        {
-            "role": "user",
-            "content": inputs["query_input"]
-        }
-    ]
-    success = True
-    while success:
-        try:
-            response = client.chat.completions.create(
-                model=args.model,
-                stream=True,
-                messages=messages,
-            )
-            success = False
-        except openai.RateLimitError as e:
-            print('Rate limit exceeded, waiting for 60 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(60)
-        except openai.APIConnectionError as e:
-            print('API connection error, waiting for 10 seconds...')
-            print(f'ERROR: {e}')
-            time.sleep(10)
-        except Exception as e:
-            if 'RequestTimeOut' in str(e):
-                print(f'ERROR: {e}')
-                time.sleep(5)
-            else:
-                print(f'ERROR: {e}')
-                return None, None
-    reasoning_content = ""  # define reasoning content
-    answer_content = ""     # define answer content
-    is_answering = False   # judge if the model is answering
+def deepseek_distill(inputs, args):
+    client = create_client(args)
+    return process_streaming_response(client, inputs, args)
+
+
+def qwen3_local(inputs, args):
+    model_name = "Qwen/Qwen3-32B"
     try:
-        for chunk in response:
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                # reasoning content
-                if hasattr(delta, 'reasoning_content') and delta.reasoning_content != None:
-                    reasoning_content += delta.reasoning_content
-                else:
-                    # answer content
-                    if delta.content != "" and is_answering is False:
-                        is_answering = True
-                    answer_content += delta.content
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype="auto",
+            # device_map="auto",
+            device_map={"": 0},
+            low_cpu_mem_usage=False,
+        )
+
+        messages = create_messages(inputs)
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True
+        )
+        model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+
+        # Generate response
+        generated_ids = model.generate(
+            **model_inputs,
+            max_new_tokens=32768
+        )
+        output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
+
+        # Parse thinking and answer content
+        try:
+            # Find </think> token (151668)
+            index = len(output_ids) - output_ids[::-1].index(151668)
+        except ValueError:
+            index = 0
+
+        reasoning_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
+        answer_content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+
+        return answer_content, reasoning_content
+
     except Exception as e:
-        print(inputs["index"])
-        print(f'ERROR: {e}')
+        print(f'Error processing local Qwen3 model at input index {inputs.get("index", "unknown")}: \n\n{type(e)} | {e}\n\n{traceback.format_exc()}')
         return None, None
-    return answer_content, reasoning_content
