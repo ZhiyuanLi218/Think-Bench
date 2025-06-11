@@ -1,23 +1,12 @@
 import re
 import time
 import openai
+import torch
 import traceback
 from openai import OpenAI
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 SYSTEM_MESSAGE = "You are an AI assistant that helps people solve their questions."
-
-try:
-    model_name = "Qwen/Qwen3-32B"
-    tokenizer_qwen = AutoTokenizer.from_pretrained(model_name)
-    model_qwen = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype="auto",
-        device_map={"": 0},  # маппим на одну гпу
-        low_cpu_mem_usage=False,
-    )
-except Exception as e:
-    print(f"For usage of local model qwen3-32b debug an error: {type(e)} | {traceback.format_exc()}")
 
 
 def extract_think_content(content):
@@ -148,33 +137,88 @@ def deepseek_distill(inputs, args):
     return process_streaming_response(client, inputs, args)
 
 
+# def qwen3_local(inputs, args):
+#     try:
+#         messages = create_messages(inputs)
+#         text = tokenizer_qwen.apply_chat_template(
+#             messages,
+#             tokenize=False,
+#             add_generation_prompt=True,
+#             enable_thinking=True,
+#         )
+#         model_inputs = tokenizer_qwen([text], return_tensors="pt").to(model_qwen.device)
+
+#         # Generate response
+#         generated_ids = model_qwen.generate(
+#             **model_inputs,
+#             max_new_tokens=32768
+#         )
+#         output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
+
+#         # Parse thinking and answer content
+#         try:
+#             # Find </think> token (151668)
+#             index = len(output_ids) - output_ids[::-1].index(151668)
+#         except ValueError:
+#             index = 0
+
+#         reasoning_content = tokenizer_qwen.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
+#         answer_content = tokenizer_qwen.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+
+#         return answer_content, reasoning_content
+
+#     except Exception as e:
+#         print(f'Error processing local Qwen3 model at input index {inputs.get("index", "unknown")}: \n\n{type(e)} | {e}\n\n{traceback.format_exc()}')
+#         return None, None
+
+model_name = "Qwen/Qwen3-32B"
+model_qwen_pool = {}
+tokenizer_qwen_pool = {}
+
+
 def qwen3_local(inputs, args):
     try:
+        index = inputs.get("index", 0)
+        device = f"cuda:{index % 2}" if torch.cuda.is_available() and torch.cuda.device_count() >= 2 else "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        # Если модель и токенизатор ещё не инициализированы на этом устройстве
+        if device not in model_qwen_pool:
+            print(f"Loading model on {device} ...")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype="auto",
+                device_map=device,
+                low_cpu_mem_usage=True,
+            )
+            tokenizer_qwen_pool[device] = tokenizer
+            model_qwen_pool[device] = model
+        else:
+            tokenizer = tokenizer_qwen_pool[device]
+            model = model_qwen_pool[device]
+
         messages = create_messages(inputs)
-        text = tokenizer_qwen.apply_chat_template(
+        text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True,
+            enable_thinking=True
         )
-        model_inputs = tokenizer_qwen([text], return_tensors="pt").to(model_qwen.device)
+        model_inputs = tokenizer([text], return_tensors="pt").to(device)
 
-        # Generate response
-        generated_ids = model_qwen.generate(
+        generated_ids = model.generate(
             **model_inputs,
             max_new_tokens=32768
         )
         output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
 
-        # Parse thinking and answer content
         try:
-            # Find </think> token (151668)
-            index = len(output_ids) - output_ids[::-1].index(151668)
+            index_split = len(output_ids) - output_ids[::-1].index(151668)
         except ValueError:
-            index = 0
+            index_split = 0
 
-        reasoning_content = tokenizer_qwen.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
-        answer_content = tokenizer_qwen.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+        reasoning_content = tokenizer.decode(output_ids[:index_split], skip_special_tokens=True).strip("\n")
+        answer_content = tokenizer.decode(output_ids[index_split:], skip_special_tokens=True).strip("\n")
 
         return answer_content, reasoning_content
 
