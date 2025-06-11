@@ -7,6 +7,19 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 SYSTEM_MESSAGE = "You are an AI assistant that helps people solve their questions."
 
+try:
+    model_name = "Qwen/Qwen3-32B"
+    tokenizer_qwen = AutoTokenizer.from_pretrained(model_name)
+    model_qwen = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype="auto",
+        device_map={"": 0},  # маппим на одну гпу
+        low_cpu_mem_usage=False,
+    )
+except Exception as e:
+    print(f"For usage of local model qwen3-32b debug an error: {type(e)} | {traceback.format_exc()}")
+
+
 def extract_think_content(content):
     think_pattern = re.compile(r'<think>(.*?)</think>', re.DOTALL)
     match = think_pattern.search(content)
@@ -136,28 +149,18 @@ def deepseek_distill(inputs, args):
 
 
 def qwen3_local(inputs, args):
-    model_name = "Qwen/Qwen3-32B"
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype="auto",
-            # device_map="auto",
-            device_map={"": 0},
-            low_cpu_mem_usage=False,
-        )
-
         messages = create_messages(inputs)
-        text = tokenizer.apply_chat_template(
+        text = tokenizer_qwen.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True
+            enable_thinking=True,
         )
-        model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+        model_inputs = tokenizer_qwen([text], return_tensors="pt").to(model_qwen.device)
 
         # Generate response
-        generated_ids = model.generate(
+        generated_ids = model_qwen.generate(
             **model_inputs,
             max_new_tokens=32768
         )
@@ -170,8 +173,8 @@ def qwen3_local(inputs, args):
         except ValueError:
             index = 0
 
-        reasoning_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
-        answer_content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+        reasoning_content = tokenizer_qwen.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
+        answer_content = tokenizer_qwen.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
 
         return answer_content, reasoning_content
 
