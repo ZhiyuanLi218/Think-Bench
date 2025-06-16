@@ -1,10 +1,21 @@
 import re
+import os
 import time
 import openai
 import torch
 import traceback
 from openai import OpenAI
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+try:
+    import gigachat
+except ImportError:
+    print(
+        "="*100,
+        "\n\nAttempted to use model gigachat, but package `gigachat` is not installed. ", 
+        "Please install gigachat via `pip install gigachat`\n\n",
+        "="*100,
+    )
 
 SYSTEM_MESSAGE = "You are an AI assistant that helps people solve their questions."
 
@@ -102,80 +113,52 @@ def process_streaming_response(client, inputs, args, extra_body=None):
 
     return answer_content, reasoning_content
 
+
 def deepseek(inputs, args):
     client = create_client(args)
     return process_non_streaming_response(client, inputs, args)
+
 
 def qwq(inputs, args):
     client = create_client(args)
     return process_streaming_response(client, inputs, args)
 
+
 def qwen3(inputs, args):
     client = create_client(args)
     return process_streaming_response(client, inputs, args, extra_body={"enable_thinking": True})
+
 
 def claude(inputs, args):
     client = create_client(args)
     content, reasoning = process_non_streaming_response(client, inputs, args)
     return extract_think_content(content) if content else (None, None)
 
+
 def grok3(inputs, args):
     client = create_client(args)
     return process_non_streaming_response(client, inputs, args)
 
+
 def ernie(inputs, args):
     client = create_client(args)
     return process_streaming_response(client, inputs, args)
+
 
 def glm(inputs, args):
     client = create_client(args)
     content, _ = process_streaming_response(client, inputs, args)
     return extract_think_content(content) if content else (None, None)
 
+
 def deepseek_distill(inputs, args):
     client = create_client(args)
     return process_streaming_response(client, inputs, args)
 
 
-# def qwen3_local(inputs, args):
-#     try:
-#         messages = create_messages(inputs)
-#         text = tokenizer_qwen.apply_chat_template(
-#             messages,
-#             tokenize=False,
-#             add_generation_prompt=True,
-#             enable_thinking=True,
-#         )
-#         model_inputs = tokenizer_qwen([text], return_tensors="pt").to(model_qwen.device)
-
-#         # Generate response
-#         generated_ids = model_qwen.generate(
-#             **model_inputs,
-#             max_new_tokens=32768
-#         )
-#         output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
-
-#         # Parse thinking and answer content
-#         try:
-#             # Find </think> token (151668)
-#             index = len(output_ids) - output_ids[::-1].index(151668)
-#         except ValueError:
-#             index = 0
-
-#         reasoning_content = tokenizer_qwen.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
-#         answer_content = tokenizer_qwen.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
-
-#         return answer_content, reasoning_content
-
-#     except Exception as e:
-#         print(f'Error processing local Qwen3 model at input index {inputs.get("index", "unknown")}: \n\n{type(e)} | {e}\n\n{traceback.format_exc()}')
-#         return None, None
-
 model_name = "Qwen/Qwen3-32B"
 model_qwen_pool = {}
 tokenizer_qwen_pool = {}
-
-
 def qwen3_local(inputs, args):
     try:
         index = inputs.get("index", 0)
@@ -208,7 +191,7 @@ def qwen3_local(inputs, args):
 
         generated_ids = model.generate(
             **model_inputs,
-            max_new_tokens=32768
+            max_new_tokens=32_768
         )
         output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
 
@@ -225,3 +208,39 @@ def qwen3_local(inputs, args):
     except Exception as e:
         print(f'Error processing local Qwen3 model at input index {inputs.get("index", "unknown")}: \n\n{type(e)} | {e}\n\n{traceback.format_exc()}')
         return None, None
+
+
+def giga(inputs, args):
+    client = gigachat.GigaChat(
+        base_url=args.llm_url,
+        credentials=os.environ.get("GIGACHAT_CREDENTIALS", None),
+        access_token=args.openai_api_key,
+        scope=os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_CORP"),
+        verify_ssl_certs=False,
+        timeout=200,
+        profanity_check=False,
+    )
+
+    payload = gigachat.models.Chat(
+        messages=[gigachat.models.Messages(role=gigachat.models.MessagesRole.USER, content=inputs["query_input"])],
+        model=args.model,
+        max_tokens=128_000,
+        temperature=1.0,
+        repetition_penalty=1.0,
+        top_p=0.0,
+    )
+
+    message = client.chat(payload).choices[0].message
+    content = message.content
+    reasoning = getattr(message, 'reasoning_content', None) or ""
+    if reasoning:
+        return content, reasoning
+    else:
+        think_pattern = re.compile(r'<think>(.*?)</think>', re.DOTALL)
+        match = think_pattern.search(content)
+        if match:
+            reasoning_content = match.group(1)
+            content = think_pattern.sub('', content).strip()
+            return content, reasoning_content
+        else:
+            return content, ""

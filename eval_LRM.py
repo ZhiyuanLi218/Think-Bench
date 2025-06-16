@@ -4,7 +4,7 @@ import json
 import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
-from utils.query_utils import claude, deepseek, deepseek_distill, ernie, glm, grok3, qwen3, qwen3_local, qwq
+from utils.query_utils import claude, deepseek, deepseek_distill, ernie, glm, grok3, qwen3, qwen3_local, qwq, giga
 
 
 models_ = {
@@ -16,6 +16,7 @@ models_ = {
     "deepseek-r1-distill-qwen-32b": deepseek_distill,
     "ernie-x1-turbo-32k": ernie,
     "glm-z1-air": glm,
+    "gigachat": giga, ###
     "grok-3-mini-beta": grok3,
     "qwen3-235b-a22b": qwen3,
     "qwen3-32b": qwen3_local, ###
@@ -73,7 +74,13 @@ def process_question(item, prompt, args):
     item["prediction"] = prediction
     item["think_content"] = think_content
     if prediction == "" or think_content == "":
-        print(f"ERROR: output seems None: {item['index']}")
+        details = []
+        if prediction == "":
+            details.append("No prediction content")
+        if think_content == "":
+            details.append("No thinking content")
+        details_message = '\n'.join(details)
+        print(f"ERROR: output seems None: {item['index']}, {details_message}")
     if prediction is not None and think_content is not None:
         save_to_cache(item, args.model, args.cache_dir)
     return item
@@ -104,6 +111,7 @@ if __name__ == "__main__":
                             "claude-3-7-sonnet-thinking-all",
                             "grok-3-mini-beta",
                             "glm-z1-air", 
+                            "gigachat",
                             "qwq-plus", 
                             "qwen3-235b-a22b",
                             "qwen3-32b", ###
