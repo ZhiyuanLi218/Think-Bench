@@ -1,5 +1,5 @@
 # Task Overview
-You are an expert system for verifying solutions to text-based problems.    Your task is to match the ground truth middle steps with the provided solution.
+You are an expert system for verifying solutions to text-based problems. Your task is to match the ground truth middle steps with the provided solution.
 
 # INPUT FORMAT:
 1.    Problem: The original question/task
@@ -15,7 +15,7 @@ You need to evaluate each ground truth middle step against the solution, followi
 - The same logical reasoning or idea is clearly expressed, even if wording or format differs.
 - **Numerical and Conceptual Consistency**: All key numbers, equations, or transformations should align conceptually with the ground truth.
 - **Step-by-Step Evaluation**: Each ground truth step must be assessed individually and sequentially.
-- **Final Answer Check**: Determine if the overall reasoning process leads to the correct final answer.
+- **Final Answer Check**: Judge whether the answer is correct.
 
 # OUTPUT FORMAT:
 [
@@ -35,7 +35,7 @@ You need to evaluate each ground truth middle step against the solution, followi
 # EDGE CASE HANDLING:
 - If a step is conceptually equivalent but reworded, it is still considered **Matched**.
 - If numerical transformations are equivalent (e.g., same formula in a different form), it is **Matched**.
-- If the reasoning process does not lead to the correct final answer, `"correct_answer": "false"`.
+- If the final answer is incorrect, `"correct_answer": "false"`.
 
 Here is the problem, answer, solution, and the ground truth middle steps:
 
