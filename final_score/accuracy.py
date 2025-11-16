@@ -42,7 +42,7 @@ def analyze_accuracy(json_file_path):
 
         steps_data = json.loads(json_str, strict=False)
 
-        correct = int(steps_data[0].get('judgment') == 'Matched')
+        correct = int(steps_data[0].get('correct_answer') == 'true')
 
         data['accuracy'] = {
             'score': correct,
